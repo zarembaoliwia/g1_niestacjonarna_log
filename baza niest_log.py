@@ -1,91 +1,126 @@
 import streamlit as st
 from supabase import create_client, Client
+import pandas as pd
 
-# Konfiguracja strony
-st.set_page_config(page_title="Zarządzanie Magazynem", layout="wide")
+# --- KONFIGURACJA ---
+st.set_page_config(page_title="Magazyn Pro v2", layout="wide", page_icon="📈")
 
-# Inicjalizacja połączenia z Supabase
 @st.cache_resource
 def init_connection():
-    url = st.secrets["supabase_url"]
-    key = st.secrets["supabase_key"]
-    return create_client(url, key)
+    try:
+        return create_client(st.secrets["supabase_url"], st.secrets["supabase_key"])
+    except Exception as e:
+        st.error("Błąd połączenia z bazą danych. Sprawdź Secrets!")
+        return None
 
-supabase: Client = init_connection()
+supabase = init_connection()
 
-st.title("📦 System Zarządzania Produktami")
+# --- FUNKCJE POMOCNICZE ---
+def fetch_data(table_name):
+    return supabase.table(table_name).select("*").execute().data
 
-tab1, tab2 = st.tabs(["Produkty", "Kategorie"])
-
-# --- TAB: KATEGORIE ---
-with tab2:
-    st.header("Zarządzanie Kategoriami")
+# --- SIDEBAR: Statystyki ---
+st.sidebar.title("📊 Statystyki")
+try:
+    prods = fetch_data("Produkty")
+    kats = fetch_data("Kategorie")
     
-    # Formularz dodawania
-    with st.form("add_category"):
-        nazwa_kat = st.text_input("Nazwa kategorii")
-        opis_kat = st.text_area("Opis")
-        submit_kat = st.form_submit_button("Dodaj kategorię")
+    total_items = sum([p['liczba'] for p in prods])
+    # Zakładając, że kolumna nazywa się 'Cena' lub 'cena'
+    total_val = sum([p.get('Cena', 0) * p['liczba'] for p in prods])
+    
+    st.sidebar.metric("Suma produktów", total_items)
+    st.sidebar.metric("Wartość magazynu", f"{total_val:,.2f} PLN")
+    st.sidebar.divider()
+except:
+    st.sidebar.warning("Nie udało się pobrać statystyk.")
+
+# --- GŁÓWNY INTERFEJS ---
+st.title("🚀 Panel Zarządzania Magazynem")
+
+tabs = st.tabs(["📋 Lista Produktów", "➕ Dodaj Nowy", "📂 Kategorie"])
+
+# TAB 1: LISTA I WYSZUKIWANIE
+with tabs[0]:
+    col_search, col_filter = st.columns([2, 1])
+    search = col_search.text_input("🔍 Szukaj produktu po nazwie...")
+    
+    # Pobieranie danych z joinem do kategorii
+    query = supabase.table("Produkty").select("*, Kategorie(nazwa)")
+    if search:
+        query = query.ilike("nazwa", f"%{search}%")
+    
+    data = query.execute().data
+    
+    if data:
+        df = pd.DataFrame(data)
+        # Czyszczenie danych do wyświetlenia
+        df['Kategoria'] = df['Kategorie'].apply(lambda x: x['nazwa'] if x else "Brak")
+        display_df = df[['id', 'nazwa', 'liczba', 'Cena', 'Kategoria']]
         
-        if submit_kat and nazwa_kat:
-            data = {"nazwa": nazwa_kat, "opis": opis_kat}
-            supabase.table("Kategorie").insert(data).execute()
-            st.success("Dodano kategorię!")
-            st.rerun()
-
-    # Wyświetlanie i usuwanie
-    res_kat = supabase.table("Kategorie").select("*").execute()
-    kategorie = res_kat.data
-    
-    if kategorie:
-        for kat in kategorie:
-            cols = st.columns([3, 1])
-            cols[0].write(f"**{kat['nazwa']}** - {kat['opis']}")
-            if cols[1].button("Usuń", key=f"del_kat_{kat['id']}"):
-                supabase.table("Kategorie").delete().eq("id", kat["id"]).execute()
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Sekcja usuwania
+        with st.expander("🗑️ Usuwanie produktów"):
+            to_delete = st.selectbox("Wybierz produkt do usunięcia", 
+                                    options=data, 
+                                    format_func=lambda x: f"{x['nazwa']} (ID: {x['id']})")
+            if st.button("Potwierdź usunięcie", type="primary"):
+                supabase.table("Produkty").delete().eq("id", to_delete['id']).execute()
+                st.toast(f"Usunięto: {to_delete['nazwa']}")
                 st.rerun()
     else:
-        st.info("Brak kategorii w bazie.")
+        st.info("Brak produktów pasujących do kryteriów.")
 
-# --- TAB: PRODUKTY ---
-with tab1:
-    st.header("Zarządzanie Produktami")
+# TAB 2: DODAWANIE PRODUKTÓW
+with tabs[1]:
+    st.subheader("Nowy Produkt")
+    if not kats:
+        st.warning("Najpierw dodaj przynajmniej jedną kategorię!")
+    else:
+        with st.form("prod_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            name = c1.text_input("Nazwa produktu*")
+            cat = c2.selectbox("Kategoria", options=kats, format_func=lambda x: x['nazwa'])
+            
+            c3, c4 = st.columns(2)
+            qty = c3.number_input("Ilość", min_value=0, value=0)
+            price = c4.number_input("Cena (PLN)", min_value=0.0, step=0.01)
+            
+            if st.form_submit_button("Dodaj do bazy"):
+                if name:
+                    payload = {
+                        "nazwa": name,
+                        "kategoria_id": cat['id'],
+                        "liczba": qty,
+                        "Cena": price
+                    }
+                    supabase.table("Produkty").insert(payload).execute()
+                    st.success("Produkt dodany!")
+                    st.rerun()
+                else:
+                    st.error("Nazwa jest wymagana!")
 
-    # Pobieranie kategorii do dropdowna
-    res_kat_prod = supabase.table("Kategorie").select("id, nazwa").execute()
-    lista_kat = {item['nazwa']: item['id'] for item in res_kat_prod.data}
-
-    # Formularz dodawania produktu
-    with st.form("add_product"):
-        nazwa_prod = st.text_input("Nazwa produktu")
-        liczba = st.number_input("Liczba (ilość)", min_value=0, step=1)
-        cena = st.number_input("Cena", min_value=0.0, format="%.2f")
-        wybrana_kat = st.selectbox("Kategoria", options=list(lista_kat.keys()))
-        
-        submit_prod = st.form_submit_button("Dodaj produkt")
-        
-        if submit_prod and nazwa_prod:
-            new_prod = {
-                "nazwa": nazwa_prod,
-                "liczba": liczba,
-                "Cena": cena, # Wielka litera jak na schemacie "Ce..."
-                "kategoria_id": lista_kat[wybrana_kat]
-            }
-            supabase.table("Produkty").insert(new_prod).execute()
-            st.success("Dodano produkt!")
-            st.rerun()
-
-    # Wyświetlanie produktów
-    res_prod = supabase.table("Produkty").select("*, Kategorie(nazwa)").execute()
-    produkty = res_prod.data
-
-    if produkty:
-        for p in produkty:
-            cols = st.columns([2, 1, 1, 1, 1])
-            cols[0].write(f"**{p['nazwa']}**")
-            cols[1].write(f"Ilość: {p['liczba']}")
-            cols[2].write(f"{p['Cena']} zł")
-            cols[3].write(f"📁 {p['Kategorie']['nazwa'] if p['Kategorie'] else 'Brak'}")
-            if cols[4].button("Usuń", key=f"del_prod_{p['id']}"):
-                supabase.table("Produkty").delete().eq("id", p["id"]).execute()
+# TAB 3: KATEGORIE
+with tabs[2]:
+    st.subheader("Zarządzaj Kategoriami")
+    
+    with st.expander("➕ Dodaj nową kategorię"):
+        new_cat_name = st.text_input("Nazwa kategorii")
+        new_cat_desc = st.text_area("Opis")
+        if st.button("Zapisz kategorię"):
+            if new_cat_name:
+                supabase.table("Kategorie").insert({"nazwa": new_cat_name, "opis": new_cat_desc}).execute()
                 st.rerun()
+
+    if kats:
+        cat_df = pd.DataFrame(kats)[['id', 'nazwa', 'opis']]
+        st.table(cat_df)
+        
+        del_cat = st.selectbox("Usuń kategorię", options=kats, format_func=lambda x: x['nazwa'])
+        if st.button("Usuń kategorię", help="Uwaga: Może to spowodować błędy, jeśli kategoria ma przypisane produkty"):
+            try:
+                supabase.table("Kategorie").delete().eq("id", del_cat['id']).execute()
+                st.rerun()
+            except:
+                st.error("Nie można usunąć kategorii, która zawiera produkty!")

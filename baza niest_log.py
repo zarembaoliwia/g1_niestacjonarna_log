@@ -3,176 +3,160 @@ import pandas as pd
 from supabase import create_client, Client
 import datetime
 
-# --- 1. KONFIGURACJA I DESIGN ---
-st.set_page_config(page_title="ERP Nexus v5.0", page_icon="🏢", layout="wide")
+# --- 1. KONFIGURACJA I STYLIZACJA ---
+st.set_page_config(page_title="System Nexus ERP v6.0", page_icon="🏢", layout="wide")
 
-# Custom CSS dla lepszego wyglądu
 st.markdown("""
     <style>
     .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #e0e0e0; }
-    .status-ok { color: #2ecc71; font-weight: bold; }
-    .status-low { color: #e74c3c; font-weight: bold; }
-    .invoice-box { 
-        padding: 25px; border: 2px solid #333; border-radius: 10px; background: #fff;
-        font-family: 'Helvetica', sans-serif;
-    }
+    .critical-card { background-color: #fff5f5; padding: 20px; border-radius: 10px; border-left: 5px solid #ff4b4b; }
+    .invoice-box { padding: 25px; border: 2px solid #333; border-radius: 10px; background: #fff; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. POŁĄCZENIE ---
+# --- 2. POŁĄCZENIE Z BAZĄ ---
 @st.cache_resource
 def init_db():
-    return create_client(st.secrets["supabase_url"], st.secrets["supabase_key"])
+    try:
+        return create_client(st.secrets["supabase_url"], st.secrets["supabase_key"])
+    except Exception as e:
+        st.error(f"Błąd połączenia z Supabase: {e}")
+        return None
 
 db = init_db()
 
-# --- 3. FUNKCJE POMOCNICZE (API WRAPPERS) ---
-def get_products_full():
-    return db.table("Produkty").select("*, Kategorie(nazwa)").execute().data
+# --- 3. WARSTWA DANYCH (CRUD) ---
+class ERPLogic:
+    @staticmethod
+    def get_all_data():
+        res = db.table("Produkty").select("*, Kategorie(nazwa)").execute()
+        return res.data
 
-def get_categories():
-    return db.table("Kategorie").select("*").execute().data
+    @staticmethod
+    def get_categories():
+        return db.table("Kategorie").select("*").execute().data
 
-# --- 4. PANEL BOCZNY (WYSZUKIWARKA STANÓW) ---
+    @staticmethod
+    def update_stock(p_id, new_qty):
+        db.table("Produkty").update({"liczba": new_qty}).eq("id", p_id).execute()
+
+# --- 4. PANEL BOCZNY (WYSZUKIWARKA I INFO) ---
 with st.sidebar:
-    st.title("🔍 Szybki Stan")
-    st.write("Sprawdź dostępność bez wchodzenia w tabele.")
+    st.title("🔍 Szybki Podgląd")
+    raw_prods = ERPLogic.get_all_data()
+    if raw_prods:
+        p_names = [p['nazwa'] for p in raw_prods]
+        search = st.selectbox("Sprawdź dostępność towaru", options=[""] + p_names)
+        if search:
+            p_found = next(i for i in raw_prods if i['nazwa'] == search)
+            st.metric("Stan aktualny", f"{p_found['liczba']} szt.")
+            st.progress(min(p_found['liczba'] / 100, 1.0))
+            if p_found['liczba'] < 5:
+                st.error("❗ Krytycznie niski stan!")
     
-    all_data = get_products_full()
-    if all_data:
-        search_names = [p['nazwa'] for p in all_data]
-        selected_search = st.selectbox("Szukaj produktu", options=[""] + search_names)
-        
-        if selected_search:
-            prod_info = next(item for item in all_data if item["nazwa"] == selected_search)
-            stan = prod_info['liczba']
-            
-            st.metric("Aktualnie na stanie", f"{stan} szt.")
-            # Wizualny pasek stanu (max założony na 100 dla skali)
-            st.progress(min(stan / 100, 1.0))
-            
-            if stan > 10:
-                st.success("✅ Stan optymalny")
-            else:
-                st.error("⚠️ Wymaga uzupełnienia!")
     st.divider()
-    st.caption("ERP System v5.0 | Projekt Kolokwium")
+    low_limit = st.slider("Próg ostrzegawczy", 0, 50, 10)
+    st.caption("Nexus ERP v6.0 | System Zarządzania")
 
-# --- 5. GŁÓWNA TREŚĆ (TABS) ---
-t_dash, t_inv, t_invoice, t_config = st.tabs([
-    "📊 Analiza Sprzedaży", "📦 Inwentaryzacja", "🧾 Faktura", "⚙️ Konfiguracja"
+# --- 5. GŁÓWNY INTERFEJS ---
+t_buy, t_inv, t_sale, t_analysis, t_config = st.tabs([
+    "🚨 PILNY ZAKUP", "📦 INWENTARYZACJA", "🧾 SPRZEDAŻ", "📊 ANALIZA", "⚙️ KONFIGURACJA"
 ])
 
-# Przygotowanie DataFrame do analiz
-df = pd.DataFrame(all_data)
+# Budowanie DataFrame do analiz
+df = pd.DataFrame(raw_prods) if raw_prods else pd.DataFrame()
 if not df.empty:
-    df['Kategoria'] = df['Kategorie'].apply(lambda x: x['nazwa'] if x else "Brak")
+    df['Kat_Nazwa'] = df['Kategorie'].apply(lambda x: x['nazwa'] if x else "Brak")
 
-# --- TAB 1: ANALIZA SPRZEDAŻY ---
-with t_dash:
-    st.header("Raport i Analityka")
+# --- TAB 1: PILNY ZAKUP (BRAKI) ---
+with t_buy:
+    st.header("🛒 Centrum Zaopatrzenia")
+    
+    # Podgląd braków
     if not df.empty:
-        c1, c2, c3 = st.columns(3)
-        total_value = (df['Cena'] * df['liczba']).sum()
-        avg_price = df['Cena'].mean()
-        
-        c1.metric("Całkowita wartość zapasów", f"{total_value:,.2f} zł")
-        c2.metric("Średnia cena produktu", f"{avg_price:,.2f} zł")
-        c3.metric("Liczba kategorii", len(df['Kategoria'].unique()))
-        
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.write("### Wartość towaru wg kategorii")
-            df['Wartość'] = df['Cena'] * df['liczba']
-            val_chart = df.groupby('Kategoria')['Wartość'].sum()
-            st.bar_chart(val_chart)
+        low_stock_df = df[df['liczba'] <= low_limit]
+        if not low_stock_df.empty:
+            st.error(f"Znaleziono {len(low_stock_df)} produktów wymagających pilnego zakupu!")
+            for _, row in low_stock_df.iterrows():
+                with st.container():
+                    c1, c2, c3 = st.columns([3, 1, 1])
+                    c1.write(f"⚠️ **{row['nazwa']}** (Obecnie: {row['liczba']} szt.)")
+                    add_qty = c2.number_input("Ile dokupić?", min_value=1, key=f"add_{row['id']}")
+                    if c3.button("Dostawa", key=f"btn_{row['id']}"):
+                        ERPLogic.update_stock(row['id'], row['liczba'] + add_qty)
+                        st.success("Zaktualizowano zapas!")
+                        st.rerun()
+        else:
+            st.success("Wszystkie stany magazynowe są na optymalnym poziomie.")
+    
+    st.divider()
+    st.subheader("➕ Wdrożenie nowego towaru (Zaopatrzenie)")
+    with st.expander("Kliknij, aby dodać produkt, którego jeszcze nie ma w sklepie"):
+        with st.form("new_product_full"):
+            col1, col2 = st.columns(2)
+            n_name = col1.text_input("Nazwa nowego towaru")
+            all_cats = ERPLogic.get_categories()
+            cat_options = {c['nazwa']: c['id'] for c in all_cats}
+            n_cat = col1.selectbox("Przypisz kategorię", options=list(cat_options.keys()))
             
-        with col_right:
-            st.write("### Top 5 najdroższych produktów")
-            top_df = df.nlargest(5, 'Cena')[['nazwa', 'Cena']]
-            st.table(top_df)
-    else:
-        st.info("Brak danych do analizy.")
+            n_price = col2.number_input("Cena zakupu/netto", min_value=0.0)
+            n_init_qty = col2.number_input("Ilość z dostawy", min_value=1)
+            
+            if st.form_submit_button("Wdróż produkt do sprzedaży"):
+                if n_name:
+                    db.table("Produkty").insert({
+                        "nazwa": n_name, "Cena": n_price, 
+                        "liczba": n_init_qty, "kategoria_id": cat_options[n_cat]
+                    }).execute()
+                    st.success(f"Produkt {n_name} został pomyślnie wprowadzony na magazyn!")
+                    st.rerun()
 
 # --- TAB 2: INWENTARYZACJA ---
 with t_inv:
-    st.header("Rejestr Magazynowy")
+    st.header("Lista Produktów")
     if not df.empty:
-        # Wyszukiwarka wewnątrz inwentaryzacji
-        q = st.text_input("Filtruj tabelę (Nazwa produktu)")
-        filtered_df = df[df['nazwa'].str.contains(q, case=False)] if q else df
-        
+        search_inv = st.text_input("Filtruj listę...")
+        display_df = df[df['nazwa'].str.contains(search_inv, case=False)] if search_inv else df
         st.dataframe(
-            filtered_df[['id', 'nazwa', 'Kategoria', 'liczba', 'Cena']],
+            display_df[['id', 'nazwa', 'Kat_Nazwa', 'liczba', 'Cena']],
             column_config={
-                "liczba": st.column_config.NumberColumn("Ilość", format="%d 📦"),
-                "Cena": st.column_config.NumberColumn("Cena netto", format="%.2f zł")
-            },
-            use_container_width=True, hide_index=True
+                "liczba": st.column_config.NumberColumn("Stan", format="%d szt."),
+                "Cena": st.column_config.NumberColumn("Cena", format="%.2f zł")
+            }, use_container_width=True, hide_index=True
         )
     else:
-        st.warning("Magazyn jest pusty.")
+        st.info("Magazyn jest pusty.")
 
 # --- TAB 3: FAKTURA ---
-with t_invoice:
-    st.header("Nowa Sprzedaż")
+with t_sale:
+    st.header("Nowa Faktura")
     if not df.empty:
-        f_col1, f_col2 = st.columns([1, 1])
-        
-        with f_col1:
-            klient = st.text_input("Dane nabywcy", placeholder="Nazwa firmy / Imię i nazwisko")
-            wybrany = st.selectbox("Produkt", options=all_data, format_func=lambda x: f"{x['nazwa']} ({x['Cena']} zł)")
-            ilosc = st.number_input("Ilość do sprzedaży", min_value=1, max_value=int(wybrany['liczba']))
-            
-            suma_netto = ilosc * float(wybrany['Cena'])
-            podatek = suma_netto * 0.23
-            suma_brutto = suma_netto + podatek
-            
-            potwierdz = st.button("🔴 WYSTAW I ZDEJMIJ ZE STANU", use_container_width=True)
+        col_s1, col_s2 = st.columns([1, 1])
+        with col_s1:
+            klient = st.text_input("Nabywca", "Klient Detaliczny")
+            wybrany = st.selectbox("Produkt", options=raw_prods, format_func=lambda x: f"{x['nazwa']} ({x['Cena']} zł)")
+            ilosc = st.number_input("Ilość", min_value=1, max_value=int(wybrany['liczba']))
+            total_netto = ilosc * float(wybrany['Cena'])
+            if st.button("Wystaw fakturę"):
+                ERPLogic.update_stock(wybrany['id'], wybrany['liczba'] - ilosc)
+                st.balloons()
+                st.rerun()
+        with col_s2:
+            st.markdown(f"<div class='invoice-box'><h3>FAKTURA</h3><hr><p>Klient: {klient}</p><p>Towar: {wybrany['nazwa']}</p><h2>Suma: {total_netto * 1.23:.2f} zł</h2></div>", unsafe_allow_html=True)
 
-        with f_col2:
-            st.markdown(f"""
-            <div class="invoice-box">
-                <h3 style="text-align:center">FAKTURA PRO-FORMA</h3>
-                <p><b>Data:</b> {datetime.date.today()}</p>
-                <p><b>Sprzedawca:</b> System ERP Student v5.0</p>
-                <p><b>Nabywca:</b> {klient}</p>
-                <hr>
-                <p>1. {wybrany['nazwa']} | {ilosc} szt. x {wybrany['Cena']:.2f} zł</p>
-                <hr>
-                <p style="text-align:right">Suma Netto: {suma_netto:.2f} zł</p>
-                <p style="text-align:right">VAT (23%): {podatek:.2f} zł</p>
-                <h2 style="text-align:right">TOTAL: {suma_brutto:.2f} zł</h2>
-            </div>
-            """, unsafe_allow_html=True)
-            
-        if potwierdz:
-            nowy_stan = wybrany['liczba'] - ilosc
-            db.table("Produkty").update({"liczba": nowy_stan}).eq("id", wybrany['id']).execute()
-            st.success(f"Sprzedano! Nowy stan dla {wybrany['nazwa']}: {nowy_stan}")
-            st.rerun()
+# --- TAB 4: ANALIZA ---
+with t_analysis:
+    st.header("Statystyki Biznesowe")
+    if not df.empty:
+        st.metric("Wartość całkowita towaru", f"{(df['Cena'] * df['liczba']).sum():,.2f} zł")
+        st.subheader("Ilość towaru w podziale na kategorie")
+        st.bar_chart(df.groupby('Kat_Nazwa')['liczba'].sum())
 
-# --- TAB 4: KONFIGURACJA ---
+# --- TAB 5: KONFIGURACJA ---
 with t_config:
-    st.header("Zarządzanie Systemem")
-    c_left, c_right = st.columns(2)
-    
-    with c_left:
-        st.subheader("Nowy Produkt")
-        with st.form("p_form", clear_on_submit=True):
-            n_name = st.text_input("Nazwa")
-            n_price = st.number_input("Cena", min_value=0.0)
-            n_qty = st.number_input("Ilość", min_value=0)
-            cats = get_categories()
-            n_cat = st.selectbox("Kategoria", options=cats, format_func=lambda x: x['nazwa'])
-            if st.form_submit_button("Dodaj Produkt"):
-                db.table("Produkty").insert({"nazwa": n_name, "Cena": n_price, "liczba": n_qty, "kategoria_id": n_cat['id']}).execute()
-                st.rerun()
-
-    with c_right:
-        st.subheader("Nowa Kategoria")
-        with st.form("c_form"):
-            k_name = st.text_input("Nazwa Kategorii")
-            if st.form_submit_button("Dodaj Kategorię"):
-                db.table("Kategorie").insert({"nazwa": k_name}).execute()
-                st.rerun()
+    st.header("Ustawienia Systemu")
+    with st.form("new_cat"):
+        c_name = st.text_input("Nazwa nowej kategorii")
+        if st.form_submit_button("Dodaj kategorię"):
+            db.table("Kategorie").insert({"nazwa": c_name}).execute()
+            st.rerun()

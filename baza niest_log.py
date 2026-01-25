@@ -3,203 +3,176 @@ import pandas as pd
 from supabase import create_client, Client
 import datetime
 
-# --- 1. KONFIGURACJA I STYLIZACJA ---
-st.set_page_config(page_title="System ERP v4.0", page_icon="🏢", layout="wide")
+# --- 1. KONFIGURACJA I DESIGN ---
+st.set_page_config(page_title="ERP Nexus v5.0", page_icon="🏢", layout="wide")
 
+# Custom CSS dla lepszego wyglądu
 st.markdown("""
     <style>
-    .stApp { background-color: #f8f9fa; }
-    .invoice-card { 
-        background-color: white; padding: 40px; border-radius: 5px;
-        border: 1px solid #ddd; font-family: 'Courier New', Courier, monospace;
-    }
-    .metric-box {
-        background-color: white; padding: 20px; border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #e0e0e0; }
+    .status-ok { color: #2ecc71; font-weight: bold; }
+    .status-low { color: #e74c3c; font-weight: bold; }
+    .invoice-box { 
+        padding: 25px; border: 2px solid #333; border-radius: 10px; background: #fff;
+        font-family: 'Helvetica', sans-serif;
     }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. POŁĄCZENIE Z BAZĄ ---
+# --- 2. POŁĄCZENIE ---
 @st.cache_resource
-def get_db():
-    try:
-        return create_client(st.secrets["supabase_url"], st.secrets["supabase_key"])
-    except Exception as e:
-        st.error(f"Błąd połączenia: {e}")
-        return None
+def init_db():
+    return create_client(st.secrets["supabase_url"], st.secrets["supabase_key"])
 
-db = get_db()
+db = init_db()
 
-# --- 3. KLASA OPERACYJNA (LOGIKA) ---
-class WarehouseManager:
-    @staticmethod
-    def get_all_products():
-        # Pobieranie z relacją kategorii
-        res = db.table("Produkty").select("*, Kategorie(nazwa)").execute()
-        return res.data
+# --- 3. FUNKCJE POMOCNICZE (API WRAPPERS) ---
+def get_products_full():
+    return db.table("Produkty").select("*, Kategorie(nazwa)").execute().data
 
-    @staticmethod
-    def get_all_categories():
-        res = db.table("Kategorie").select("*").execute()
-        return res.data
+def get_categories():
+    return db.table("Kategorie").select("*").execute().data
 
-    @staticmethod
-    def update_stock(prod_id, quantity_change, current_stock):
-        new_qty = current_stock - quantity_change
-        db.table("Produkty").update({"liczba": new_qty}).eq("id", prod_id).execute()
-        return new_qty
-
-    @staticmethod
-    def add_product(data):
-        return db.table("Produkty").insert(data).execute()
-
-# --- 4. SIDEBAR ---
+# --- 4. PANEL BOCZNY (WYSZUKIWARKA STANÓW) ---
 with st.sidebar:
-    st.title("🛡️ ERP Admin")
-    st.subheader("Ustawienia Systemu")
-    low_stock_threshold = st.number_input("Próg niskiego stanu", value=10)
+    st.title("🔍 Szybki Stan")
+    st.write("Sprawdź dostępność bez wchodzenia w tabele.")
+    
+    all_data = get_products_full()
+    if all_data:
+        search_names = [p['nazwa'] for p in all_data]
+        selected_search = st.selectbox("Szukaj produktu", options=[""] + search_names)
+        
+        if selected_search:
+            prod_info = next(item for item in all_data if item["nazwa"] == selected_search)
+            stan = prod_info['liczba']
+            
+            st.metric("Aktualnie na stanie", f"{stan} szt.")
+            # Wizualny pasek stanu (max założony na 100 dla skali)
+            st.progress(min(stan / 100, 1.0))
+            
+            if stan > 10:
+                st.success("✅ Stan optymalny")
+            else:
+                st.error("⚠️ Wymaga uzupełnienia!")
     st.divider()
-    st.info("Zalogowano jako: Administrator")
+    st.caption("ERP System v5.0 | Projekt Kolokwium")
 
-# --- 5. GŁÓWNY INTERFEJS (TABS) ---
-t1, t2, t3, t4 = st.tabs(["📈 Analiza", "📦 Inwentaryzacja", "🧾 Faktura Sprzedaży", "⚙️ Konfiguracja"])
+# --- 5. GŁÓWNA TREŚĆ (TABS) ---
+t_dash, t_inv, t_invoice, t_config = st.tabs([
+    "📊 Analiza Sprzedaży", "📦 Inwentaryzacja", "🧾 Faktura", "⚙️ Konfiguracja"
+])
 
-# Pobranie danych na starcie
-raw_products = WarehouseManager.get_all_products()
-df = pd.DataFrame(raw_products) if raw_products else pd.DataFrame()
-
+# Przygotowanie DataFrame do analiz
+df = pd.DataFrame(all_data)
 if not df.empty:
-    df['kat_name'] = df['Kategorie'].apply(lambda x: x['nazwa'] if x else "Brak")
+    df['Kategoria'] = df['Kategorie'].apply(lambda x: x['nazwa'] if x else "Brak")
 
-# --- TAB 1: DASHBOARD ---
-with t1:
-    st.header("Analityka Magazynowa")
+# --- TAB 1: ANALIZA SPRZEDAŻY ---
+with t_dash:
+    st.header("Raport i Analityka")
     if not df.empty:
-        m1, m2, m3, m4 = st.columns(4)
-        total_val = (df['Cena'] * df['liczba']).sum()
-        low_items = df[df['liczba'] <= low_stock_threshold]
+        c1, c2, c3 = st.columns(3)
+        total_value = (df['Cena'] * df['liczba']).sum()
+        avg_price = df['Cena'].mean()
         
-        m1.metric("Wartość towarów", f"{total_val:,.2f} zł")
-        m2.metric("Liczba SKU", len(df))
-        m3.metric("Suma jednostek", int(df['liczba'].sum()))
-        m4.metric("Alerty zapasów", len(low_items), delta=-len(low_items), delta_color="inverse")
+        c1.metric("Całkowita wartość zapasów", f"{total_value:,.2f} zł")
+        c2.metric("Średnia cena produktu", f"{avg_price:,.2f} zł")
+        c3.metric("Liczba kategorii", len(df['Kategoria'].unique()))
         
-        st.subheader("Rozkład zapasów wg kategorii")
-        st.bar_chart(df.groupby('kat_name')['liczba'].sum())
+        col_left, col_right = st.columns(2)
+        with col_left:
+            st.write("### Wartość towaru wg kategorii")
+            df['Wartość'] = df['Cena'] * df['liczba']
+            val_chart = df.groupby('Kategoria')['Wartość'].sum()
+            st.bar_chart(val_chart)
+            
+        with col_right:
+            st.write("### Top 5 najdroższych produktów")
+            top_df = df.nlargest(5, 'Cena')[['nazwa', 'Cena']]
+            st.table(top_df)
     else:
-        st.warning("Brak danych do analizy.")
+        st.info("Brak danych do analizy.")
 
 # --- TAB 2: INWENTARYZACJA ---
-with t2:
-    st.header("Pełna Inwentaryzacja")
+with t_inv:
+    st.header("Rejestr Magazynowy")
     if not df.empty:
-        # Filtrowanie
-        col_f1, col_f2 = st.columns(2)
-        search_query = col_f1.text_input("Szukaj produktu...")
-        cat_filter = col_f2.multiselect("Filtruj wg kategorii", options=df['kat_name'].unique())
+        # Wyszukiwarka wewnątrz inwentaryzacji
+        q = st.text_input("Filtruj tabelę (Nazwa produktu)")
+        filtered_df = df[df['nazwa'].str.contains(q, case=False)] if q else df
         
-        filtered_df = df.copy()
-        if search_query:
-            filtered_df = filtered_df[filtered_df['nazwa'].str.contains(search_query, case=False)]
-        if cat_filter:
-            filtered_df = filtered_df[filtered_df['kat_name'].isin(cat_filter)]
-            
         st.dataframe(
-            filtered_df[['id', 'nazwa', 'kat_name', 'liczba', 'Cena']],
+            filtered_df[['id', 'nazwa', 'Kategoria', 'liczba', 'Cena']],
             column_config={
-                "id": "ID", "nazwa": "Nazwa Produktu", 
-                "kat_name": "Kategoria", "liczba": "Stan", "Cena": "Cena (PLN)"
+                "liczba": st.column_config.NumberColumn("Ilość", format="%d 📦"),
+                "Cena": st.column_config.NumberColumn("Cena netto", format="%.2f zł")
             },
             use_container_width=True, hide_index=True
         )
-        
-        # Szybka edycja stanów
-        with st.expander("🛠️ Szybka korekta stanu"):
-            with st.form("quick_edit"):
-                sel_p = st.selectbox("Wybierz produkt", options=raw_products, format_func=lambda x: x['nazwa'])
-                new_val = st.number_input("Nowa ilość", value=sel_p['liczba'])
-                if st.form_submit_button("Aktualizuj stan"):
-                    db.table("Produkty").update({"liczba": new_val}).eq("id", sel_p['id']).execute()
-                    st.success("Zaktualizowano!")
-                    st.rerun()
     else:
-        st.info("Magazyn jest pusty.")
+        st.warning("Magazyn jest pusty.")
 
 # --- TAB 3: FAKTURA ---
-with t3:
-    st.header("Generator Dokumentów")
+with t_invoice:
+    st.header("Nowa Sprzedaż")
     if not df.empty:
-        c_left, c_right = st.columns([1, 1.5])
+        f_col1, f_col2 = st.columns([1, 1])
         
-        with c_left:
-            client_name = st.text_input("Nazwa Klienta", "Kontrahent ABC")
-            sel_prod = st.selectbox("Produkt na fakturze", options=raw_products, format_func=lambda x: f"{x['nazwa']} (Stan: {x['liczba']})")
-            qty_sale = st.number_input("Ilość sprzedaży", min_value=1, max_value=int(sel_prod['liczba']) if sel_prod['liczba'] > 0 else 1)
-            tax_rate = st.selectbox("Stawka VAT", [23, 8, 5, 0])
+        with f_col1:
+            klient = st.text_input("Dane nabywcy", placeholder="Nazwa firmy / Imię i nazwisko")
+            wybrany = st.selectbox("Produkt", options=all_data, format_func=lambda x: f"{x['nazwa']} ({x['Cena']} zł)")
+            ilosc = st.number_input("Ilość do sprzedaży", min_value=1, max_value=int(wybrany['liczba']))
             
-            total_netto = qty_sale * float(sel_prod['Cena'])
-            total_brutto = total_netto * (1 + tax_rate/100)
+            suma_netto = ilosc * float(wybrany['Cena'])
+            podatek = suma_netto * 0.23
+            suma_brutto = suma_netto + podatek
             
-        with c_right:
+            potwierdz = st.button("🔴 WYSTAW I ZDEJMIJ ZE STANU", use_container_width=True)
+
+        with f_col2:
             st.markdown(f"""
-            <div class="invoice-card">
-                <h2 style="text-align:center">FAKTURA VAT</h2>
-                <p style="text-align:right">Data: {datetime.date.today()}</p>
+            <div class="invoice-box">
+                <h3 style="text-align:center">FAKTURA PRO-FORMA</h3>
+                <p><b>Data:</b> {datetime.date.today()}</p>
+                <p><b>Sprzedawca:</b> System ERP Student v5.0</p>
+                <p><b>Nabywca:</b> {klient}</p>
                 <hr>
-                <p><b>Sprzedawca:</b> ERP System Pro sp. z o.o.</p>
-                <p><b>Nabywca:</b> {client_name}</p>
-                <br>
-                <table style="width:100%">
-                    <tr style="border-bottom: 1px solid #000">
-                        <th>Pozycja</th><th>Ilość</th><th>Cena</th><th>Suma</th>
-                    </tr>
-                    <tr>
-                        <td>{sel_prod['nazwa']}</td>
-                        <td>{qty_sale} szt.</td>
-                        <td>{sel_prod['Cena']:.2f}</td>
-                        <td>{total_netto:.2f}</td>
-                    </tr>
-                </table>
-                <br><br>
-                <h3 style="text-align:right">Razem Brutto: {total_brutto:.2f} PLN</h3>
+                <p>1. {wybrany['nazwa']} | {ilosc} szt. x {wybrany['Cena']:.2f} zł</p>
+                <hr>
+                <p style="text-align:right">Suma Netto: {suma_netto:.2f} zł</p>
+                <p style="text-align:right">VAT (23%): {podatek:.2f} zł</p>
+                <h2 style="text-align:right">TOTAL: {suma_brutto:.2f} zł</h2>
             </div>
             """, unsafe_allow_html=True)
             
-            if st.button("🚀 Zatwierdź i Wydrukuj (Zdejmij ze stanu)", use_container_width=True):
-                if sel_prod['liczba'] >= qty_sale:
-                    WarehouseManager.update_stock(sel_prod['id'], qty_sale, sel_prod['liczba'])
-                    st.success("Transakcja zakończona! Stan magazynowy zaktualizowany.")
-                    st.balloons()
-                    st.rerun()
-                else:
-                    st.error("Błąd: Niewystarczająca ilość towaru!")
-    else:
-        st.warning("Brak produktów do sprzedaży.")
+        if potwierdz:
+            nowy_stan = wybrany['liczba'] - ilosc
+            db.table("Produkty").update({"liczba": nowy_stan}).eq("id", wybrany['id']).execute()
+            st.success(f"Sprzedano! Nowy stan dla {wybrany['nazwa']}: {nowy_stan}")
+            st.rerun()
 
 # --- TAB 4: KONFIGURACJA ---
-with t4:
-    col_a, col_b = st.columns(2)
+with t_config:
+    st.header("Zarządzanie Systemem")
+    c_left, c_right = st.columns(2)
     
-    with col_a:
-        st.subheader("Kategorie")
-        new_k = st.text_input("Nazwa nowej kategorii")
-        if st.button("Dodaj kategorię"):
-            if new_k:
-                db.table("Kategorie").insert({"nazwa": new_k}).execute()
-                st.rerun()
-                
-    with col_b:
+    with c_left:
         st.subheader("Nowy Produkt")
-        with st.form("add_p"):
-            p_n = st.text_input("Nazwa")
-            p_c = st.number_input("Cena", min_value=0.0)
-            p_q = st.number_input("Ilość", min_value=0)
-            cats = WarehouseManager.get_all_categories()
-            p_k = st.selectbox("Kategoria", options=cats, format_func=lambda x: x['nazwa'])
-            if st.form_submit_button("Zapisz produkt"):
-                WarehouseManager.add_product({"nazwa": p_n, "Cena": p_c, "liczba": p_q, "kategoria_id": p_k['id']})
+        with st.form("p_form", clear_on_submit=True):
+            n_name = st.text_input("Nazwa")
+            n_price = st.number_input("Cena", min_value=0.0)
+            n_qty = st.number_input("Ilość", min_value=0)
+            cats = get_categories()
+            n_cat = st.selectbox("Kategoria", options=cats, format_func=lambda x: x['nazwa'])
+            if st.form_submit_button("Dodaj Produkt"):
+                db.table("Produkty").insert({"nazwa": n_name, "Cena": n_price, "liczba": n_qty, "kategoria_id": n_cat['id']}).execute()
                 st.rerun()
 
-st.divider()
-st.caption("ERP Cloud System © 2024 | Projekt na ocenę Bardzo Dobrą")
+    with c_right:
+        st.subheader("Nowa Kategoria")
+        with st.form("c_form"):
+            k_name = st.text_input("Nazwa Kategorii")
+            if st.form_submit_button("Dodaj Kategorię"):
+                db.table("Kategorie").insert({"nazwa": k_name}).execute()
+                st.rerun()

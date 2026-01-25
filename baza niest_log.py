@@ -3,145 +3,203 @@ import pandas as pd
 from supabase import create_client, Client
 import datetime
 
-# --- 1. KONFIGURACJA ---
-st.set_page_config(page_title="ERP Magazyn Pro v3.5", page_icon="🧾", layout="wide")
+# --- 1. KONFIGURACJA I STYLIZACJA ---
+st.set_page_config(page_title="System ERP v4.0", page_icon="🏢", layout="wide")
 
-# Stylizacja dla dokumentu faktury
 st.markdown("""
     <style>
-    .invoice-box {
-        background-color: white; padding: 30px; border: 1px solid #eee;
-        box-shadow: 0 0 10px rgba(0, 0, 0, 0.15); font-size: 14px; color: #555;
+    .stApp { background-color: #f8f9fa; }
+    .invoice-card { 
+        background-color: white; padding: 40px; border-radius: 5px;
+        border: 1px solid #ddd; font-family: 'Courier New', Courier, monospace;
     }
-    .invoice-header { font-weight: bold; color: #000; }
+    .metric-box {
+        background-color: white; padding: 20px; border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. POŁĄCZENIE ---
+# --- 2. POŁĄCZENIE Z BAZĄ ---
 @st.cache_resource
-def init_connection():
-    return create_client(st.secrets["supabase_url"], st.secrets["supabase_key"])
+def get_db():
+    try:
+        return create_client(st.secrets["supabase_url"], st.secrets["supabase_key"])
+    except Exception as e:
+        st.error(f"Błąd połączenia: {e}")
+        return None
 
-supabase = init_connection()
+db = get_db()
 
-# --- 3. LOGIKA BIZNESOWA ---
-def fetch_data(table):
-    return supabase.table(table).select("*").execute().data
+# --- 3. KLASA OPERACYJNA (LOGIKA) ---
+class WarehouseManager:
+    @staticmethod
+    def get_all_products():
+        # Pobieranie z relacją kategorii
+        res = db.table("Produkty").select("*, Kategorie(nazwa)").execute()
+        return res.data
 
-def update_stock(product_id, new_qty):
-    supabase.table("Produkty").update({"liczba": new_qty}).eq("id", product_id).execute()
+    @staticmethod
+    def get_all_categories():
+        res = db.table("Kategorie").select("*").execute()
+        return res.data
 
-# --- 4. INTERFEJS ---
-st.title("🚀 Zaawansowany System Magazynowy & Sprzedaży")
+    @staticmethod
+    def update_stock(prod_id, quantity_change, current_stock):
+        new_qty = current_stock - quantity_change
+        db.table("Produkty").update({"liczba": new_qty}).eq("id", prod_id).execute()
+        return new_qty
 
-tabs = st.tabs(["📊 Dashboard", "📋 Produkty", "🧾 Wystaw Fakturę", "📂 Kategorie"])
+    @staticmethod
+    def add_product(data):
+        return db.table("Produkty").insert(data).execute()
 
-# --- TAB: DASHBOARD ---
-with tabs[0]:
-    prods = fetch_data("Produkty")
-    if prods:
-        df = pd.DataFrame(prods)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Łączna wartość", f"{(df['liczba'] * df['Cena']).sum():,.2f} zł")
-        c2.metric("Liczba SKU", len(df))
-        c3.metric("Niskie stany", len(df[df['liczba'] < 5]))
-        st.bar_chart(df.set_index('nazwa')['liczba'])
+# --- 4. SIDEBAR ---
+with st.sidebar:
+    st.title("🛡️ ERP Admin")
+    st.subheader("Ustawienia Systemu")
+    low_stock_threshold = st.number_input("Próg niskiego stanu", value=10)
+    st.divider()
+    st.info("Zalogowano jako: Administrator")
 
-# --- TAB: PRODUKTY ---
-with tabs[1]:
-    st.subheader("Aktualne zapasy")
-    raw_data = supabase.table("Produkty").select("*, Kategorie(nazwa)").execute().data
-    if raw_data:
-        formatted_data = [{
-            "Produkt": r["nazwa"], 
-            "Ilość": r["liczba"], 
-            "Cena": f"{r['Cena']:.2f} zł",
-            "Kategoria": r["Kategorie"]["nazwa"] if r["Kategorie"] else "Brak"
-        } for r in raw_data]
-        st.table(formatted_data)
+# --- 5. GŁÓWNY INTERFEJS (TABS) ---
+t1, t2, t3, t4 = st.tabs(["📈 Analiza", "📦 Inwentaryzacja", "🧾 Faktura Sprzedaży", "⚙️ Konfiguracja"])
 
-# --- TAB: FAKTURA (NOWOŚĆ!) ---
-with tabs[2]:
-    st.header("Generator Faktury Sprzedażowej")
-    
-    col_f1, col_f2 = st.columns([1, 2])
-    
-    with col_f1:
-        st.subheader("Dane sprzedaży")
-        all_prods = fetch_data("Produkty")
-        prod_names = {p['nazwa']: p for p in all_prods if p['liczba'] > 0}
+# Pobranie danych na starcie
+raw_products = WarehouseManager.get_all_products()
+df = pd.DataFrame(raw_products) if raw_products else pd.DataFrame()
+
+if not df.empty:
+    df['kat_name'] = df['Kategorie'].apply(lambda x: x['nazwa'] if x else "Brak")
+
+# --- TAB 1: DASHBOARD ---
+with t1:
+    st.header("Analityka Magazynowa")
+    if not df.empty:
+        m1, m2, m3, m4 = st.columns(4)
+        total_val = (df['Cena'] * df['liczba']).sum()
+        low_items = df[df['liczba'] <= low_stock_threshold]
         
-        selected_p_name = st.selectbox("Wybierz produkt", options=list(prod_names.keys()))
-        customer = st.text_input("Nabywca", "Jan Kowalski - Firma Testowa")
+        m1.metric("Wartość towarów", f"{total_val:,.2f} zł")
+        m2.metric("Liczba SKU", len(df))
+        m3.metric("Suma jednostek", int(df['liczba'].sum()))
+        m4.metric("Alerty zapasów", len(low_items), delta=-len(low_items), delta_color="inverse")
         
-        if selected_p_name:
-            chosen = prod_names[selected_p_name]
-            max_qty = chosen['liczba']
-            qty_to_sell = st.number_input(f"Ilość (Dostępne: {max_qty})", min_value=1, max_value=max_qty, value=1)
-            rabat = st.slider("Rabat (%)", 0, 50, 0)
+        st.subheader("Rozkład zapasów wg kategorii")
+        st.bar_chart(df.groupby('kat_name')['liczba'].sum())
+    else:
+        st.warning("Brak danych do analizy.")
+
+# --- TAB 2: INWENTARYZACJA ---
+with t2:
+    st.header("Pełna Inwentaryzacja")
+    if not df.empty:
+        # Filtrowanie
+        col_f1, col_f2 = st.columns(2)
+        search_query = col_f1.text_input("Szukaj produktu...")
+        cat_filter = col_f2.multiselect("Filtruj wg kategorii", options=df['kat_name'].unique())
+        
+        filtered_df = df.copy()
+        if search_query:
+            filtered_df = filtered_df[filtered_df['nazwa'].str.contains(search_query, case=False)]
+        if cat_filter:
+            filtered_df = filtered_df[filtered_df['kat_name'].isin(cat_filter)]
             
-            cena_brutto = float(chosen['Cena']) * (1 - rabat/100)
-            razem = cena_brutto * qty_to_sell
+        st.dataframe(
+            filtered_df[['id', 'nazwa', 'kat_name', 'liczba', 'Cena']],
+            column_config={
+                "id": "ID", "nazwa": "Nazwa Produktu", 
+                "kat_name": "Kategoria", "liczba": "Stan", "Cena": "Cena (PLN)"
+            },
+            use_container_width=True, hide_index=True
+        )
+        
+        # Szybka edycja stanów
+        with st.expander("🛠️ Szybka korekta stanu"):
+            with st.form("quick_edit"):
+                sel_p = st.selectbox("Wybierz produkt", options=raw_products, format_func=lambda x: x['nazwa'])
+                new_val = st.number_input("Nowa ilość", value=sel_p['liczba'])
+                if st.form_submit_button("Aktualizuj stan"):
+                    db.table("Produkty").update({"liczba": new_val}).eq("id", sel_p['id']).execute()
+                    st.success("Zaktualizowano!")
+                    st.rerun()
+    else:
+        st.info("Magazyn jest pusty.")
 
-    with col_f2:
-        st.subheader("Podgląd dokumentu")
-        if selected_p_name:
-            # Renderowanie faktury w HTML/Markdown
+# --- TAB 3: FAKTURA ---
+with t3:
+    st.header("Generator Dokumentów")
+    if not df.empty:
+        c_left, c_right = st.columns([1, 1.5])
+        
+        with c_left:
+            client_name = st.text_input("Nazwa Klienta", "Kontrahent ABC")
+            sel_prod = st.selectbox("Produkt na fakturze", options=raw_products, format_func=lambda x: f"{x['nazwa']} (Stan: {x['liczba']})")
+            qty_sale = st.number_input("Ilość sprzedaży", min_value=1, max_value=int(sel_prod['liczba']) if sel_prod['liczba'] > 0 else 1)
+            tax_rate = st.selectbox("Stawka VAT", [23, 8, 5, 0])
+            
+            total_netto = qty_sale * float(sel_prod['Cena'])
+            total_brutto = total_netto * (1 + tax_rate/100)
+            
+        with c_right:
             st.markdown(f"""
-            <div class="invoice-box">
-                <table style="width:100%">
-                    <tr>
-                        <td class="invoice-header">FAKTURA NR: {datetime.datetime.now().strftime('%Y/%m/%d')}/001</td>
-                        <td style="text-align:right">Data: {datetime.date.today()}</td>
-                    </tr>
-                </table>
+            <div class="invoice-card">
+                <h2 style="text-align:center">FAKTURA VAT</h2>
+                <p style="text-align:right">Data: {datetime.date.today()}</p>
                 <hr>
-                <p><b>Sprzedawca:</b> Moja Firma Magazynowa sp. z o.o.</p>
-                <p><b>Nabywca:</b> {customer}</p>
-                <table style="width:100%; border-collapse: collapse;">
-                    <tr style="background: #eee;">
-                        <th>Produkt</th><th>Ilość</th><th>Cena jedn.</th><th>Suma</th>
+                <p><b>Sprzedawca:</b> ERP System Pro sp. z o.o.</p>
+                <p><b>Nabywca:</b> {client_name}</p>
+                <br>
+                <table style="width:100%">
+                    <tr style="border-bottom: 1px solid #000">
+                        <th>Pozycja</th><th>Ilość</th><th>Cena</th><th>Suma</th>
                     </tr>
                     <tr>
-                        <td>{selected_p_name}</td>
-                        <td style="text-align:center">{qty_to_sell} szt.</td>
-                        <td style="text-align:right">{cena_brutto:.2f} zł</td>
-                        <td style="text-align:right"><b>{razem:.2f} zł</b></td>
+                        <td>{sel_prod['nazwa']}</td>
+                        <td>{qty_sale} szt.</td>
+                        <td>{sel_prod['Cena']:.2f}</td>
+                        <td>{total_netto:.2f}</td>
                     </tr>
                 </table>
-                <br>
-                <h3 style="text-align:right">DO ZAPŁATY: {razem:.2f} PLN</h3>
+                <br><br>
+                <h3 style="text-align:right">Razem Brutto: {total_brutto:.2f} PLN</h3>
             </div>
             """, unsafe_allow_html=True)
             
-            if st.button("✅ Potwierdź sprzedaż i zdejmij ze stanu"):
-                # 1. Oblicz nowy stan
-                new_stock = chosen['liczba'] - qty_to_sell
-                # 2. Wyślij do bazy
-                update_stock(chosen['id'], new_stock)
-                st.balloons()
-                st.success(f"Sprzedano! Nowy stan produktu {selected_p_name}: {new_stock} szt.")
-                # Opcjonalnie: st.rerun() po chwili
+            if st.button("🚀 Zatwierdź i Wydrukuj (Zdejmij ze stanu)", use_container_width=True):
+                if sel_prod['liczba'] >= qty_sale:
+                    WarehouseManager.update_stock(sel_prod['id'], qty_sale, sel_prod['liczba'])
+                    st.success("Transakcja zakończona! Stan magazynowy zaktualizowany.")
+                    st.balloons()
+                    st.rerun()
+                else:
+                    st.error("Błąd: Niewystarczająca ilość towaru!")
+    else:
+        st.warning("Brak produktów do sprzedaży.")
 
-# --- TAB: KATEGORIE ---
-with tabs[3]:
-    st.subheader("Zarządzanie strukturą")
-    with st.form("cat_form"):
-        name = st.text_input("Nowa kategoria")
-        desc = st.text_area("Opis")
-        if st.form_submit_button("Dodaj"):
-            if name:
-                supabase.table("Kategorie").insert({"nazwa": name, "opis": desc}).execute()
-                st.rerun()
+# --- TAB 4: KONFIGURACJA ---
+with t4:
+    col_a, col_b = st.columns(2)
     
-    cats = fetch_data("Kategorie")
-    for c in cats:
-        st.write(f"• **{c['nazwa']}**")
+    with col_a:
+        st.subheader("Kategorie")
+        new_k = st.text_input("Nazwa nowej kategorii")
+        if st.button("Dodaj kategorię"):
+            if new_k:
+                db.table("Kategorie").insert({"nazwa": new_k}).execute()
+                st.rerun()
+                
+    with col_b:
+        st.subheader("Nowy Produkt")
+        with st.form("add_p"):
+            p_n = st.text_input("Nazwa")
+            p_c = st.number_input("Cena", min_value=0.0)
+            p_q = st.number_input("Ilość", min_value=0)
+            cats = WarehouseManager.get_all_categories()
+            p_k = st.selectbox("Kategoria", options=cats, format_func=lambda x: x['nazwa'])
+            if st.form_submit_button("Zapisz produkt"):
+                WarehouseManager.add_product({"nazwa": p_n, "Cena": p_c, "liczba": p_q, "kategoria_id": p_k['id']})
+                st.rerun()
 
-# --- STOPKA ---
-st.sidebar.markdown(f"""
----
-**Status Systemu:** 🟢 Połączono
-**User:** Student_5.0
-**Baza:** Supabase Cloud
-""")
+st.divider()
+st.caption("ERP Cloud System © 2024 | Projekt na ocenę Bardzo Dobrą")
